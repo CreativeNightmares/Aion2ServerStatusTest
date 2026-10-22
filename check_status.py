@@ -87,8 +87,8 @@ def build_embed(current, down_since, now, recovering):
                      f"{SERVER_NAME} may not be showing as online yet")
     if down_since is not None:   # only shown while the server isn't online
         lines.append(f"⏳ **Offline since** <t:{down_since}:R>")
-    lines.append(f"🔄 **Last checked** <t:{now}:R> · "
-                 f"**Next check** <t:{now + CHECK_INTERVAL_MINUTES * 60}:R>")
+    lines.append(f"🔄 **Last checked** <t:{now}:R>")
+    lines.append(f"⏭️ **Next check** <t:{now + CHECK_INTERVAL_MINUTES * 60}:R>")
     lines.append(f"[Server Status Information provided by aion2.gaming.tools]({URL})")
     return {
         "title": f"AION 2 · {SERVER_NAME}",
