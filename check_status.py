@@ -76,7 +76,7 @@ def fetch_server():
     return mine
 
 
-def build_embed(current, since, now, recovering):
+def build_embed(current, down_since, now, recovering):
     key = current["status"].lower()
     icon = ICONS.get(key, "⚪")
     lines = [f"## {icon} {current['status']}"]
@@ -84,20 +84,23 @@ def build_embed(current, since, now, recovering):
         lines.append(f"🟡 **Servers are coming back online** · "
                      f"{SERVER_NAME} may not be showing as online yet")
     lines.append(f"[Server Status Information provided by aion2.gaming.tools]({URL})")
+    fields = [
+        {"name": "Region", "value": REGION, "inline": True},
+        {"name": "Faction", "value": current["faction"], "inline": True},
+        {"name": "Online in region",
+         "value": f"{current['region_online']} / {current['region_total']}", "inline": True},
+        {"name": "Last checked", "value": f"<t:{now}:R>", "inline": True},
+        {"name": "Next check", "value": f"<t:{now + CHECK_INTERVAL_MINUTES * 60}:R>", "inline": True},
+    ]
+    if down_since is not None:   # only shown while the server isn't online
+        fields.append({"name": "Offline since",
+                       "value": f"<t:{down_since}:R>", "inline": True})
     return {
         "title": f"AION 2 · {SERVER_NAME}",
         "url": URL,
         "color": COLORS.get(key, 0x95A5A6),
         "description": "\n".join(lines),
-        "fields": [
-            {"name": "Region", "value": REGION, "inline": True},
-            {"name": "Faction", "value": current["faction"], "inline": True},
-            {"name": "Online in region",
-             "value": f"{current['region_online']} / {current['region_total']}", "inline": True},
-            {"name": "Status since", "value": f"<t:{since}:R>", "inline": True},
-            {"name": "Last checked", "value": f"<t:{now}:R>", "inline": True},
-            {"name": "Next check", "value": f"<t:{now + CHECK_INTERVAL_MINUTES * 60}:R>", "inline": True},
-        ],
+        "fields": fields,
         "footer": {"text": f"Checked about every {CHECK_INTERVAL_MINUTES} minutes"},
     }
 
@@ -154,19 +157,26 @@ def main():
     prev = json.loads(STATE_FILE.read_text()) if STATE_FILE.exists() else {}
     now = int(time.time())
 
-    status_changed = prev.get("status") != current["status"]
-    since = now if status_changed else prev.get("since", now)
-
     # "Coming back online": the region hit zero online, and now some servers are
     # up while ours still isn't. The flag is cleared once our server is online.
     online_n = current["region_online"]
     mine_online = current["status"].lower() == "online"
+
+    # When did the server stop being online? Kept across status changes
+    # (e.g. Offline -> Maintenance) so the timer covers the whole downtime.
+    if mine_online:
+        down_since = None
+    else:
+        fallback = None
+        if (prev.get("status") or "online").lower() != "online":
+            fallback = prev.get("since")       # carry over from the old format
+        down_since = prev.get("down_since") or fallback or now
     region_down = prev.get("region_down", False) or online_n == 0
     recovering = region_down and online_n >= RECOVERY_MIN_ONLINE and not mine_online
     if mine_online:
         region_down = False
 
-    embed = build_embed(current, since, now, recovering)
+    embed = build_embed(current, down_since, now, recovering)
 
     # Per-webhook state, keyed by a hash. Migrate the old single-webhook format.
     hooks_prev = prev.get("hooks", {})
@@ -211,7 +221,7 @@ def main():
             hs = old   # keep previous state so this webhook is retried next run
         hooks_new[key] = hs
 
-    state = {"status": current["status"], "since": since,
+    state = {"status": current["status"], "down_since": down_since,
              "region_down": region_down, "hooks": hooks_new}
     if state != prev:
         STATE_FILE.write_text(json.dumps(state, indent=2))
