@@ -97,7 +97,7 @@ def build_embed(current, down_since, now, recovering):
         "fields": [
             {"name": "Region", "value": REGION, "inline": True},
             {"name": "Faction", "value": current["faction"], "inline": True},
-            {"name": "Online in region",
+            {"name": "Servers online",
              "value": f"{current['region_online']} / {current['region_total']}", "inline": True},
         ],
         "footer": {"text": f"Checked about every {CHECK_INTERVAL_MINUTES} minutes"},
