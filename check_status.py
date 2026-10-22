@@ -19,6 +19,8 @@ from bs4 import BeautifulSoup
 SERVER_NAME = os.environ["AION_SERVER"]
 REGION = os.environ["AION_REGION"]
 CHECK_INTERVAL_MINUTES = 5  # how often your timer (cron-job.org) triggers a check
+RECOVERY_MIN_ONLINE = 1     # servers online (after the region hit 0) to say
+                            # "servers are coming back online"
 NOTIFY_ON_CHANGE = False    # True = also post a short new message on each change
                             # (edits to the embed don't notify anyone)
 NOTIFICATION_EXPIRY_HOURS = 6   # delete a notification after this many hours
@@ -41,10 +43,13 @@ NO_MENTIONS = {"parse": []}
 
 
 def fetch_server():
+    """Returns our server's status plus how many servers in the region are online."""
     resp = requests.get(URL, headers=HEADERS, timeout=30)
     resp.raise_for_status()
     soup = BeautifulSoup(resp.text, "html.parser")
 
+    mine, seen = None, set()
+    region_online = region_total = 0
     for row in soup.select("tr"):
         cells = [c.get_text(" ", strip=True) for c in row.find_all("td")]
         if len(cells) < 6:
@@ -52,33 +57,57 @@ def fetch_server():
         # Columns: Favorites | Status | Server | Faction | Region | Population | 24h
         status, server, faction, region = cells[1:5]
         words = server.split()
-        if not words:
+        if not words or region.lower() != REGION.lower():
             continue
-        if words[0].lower() == SERVER_NAME.lower() and region.lower() == REGION.lower():
-            return {"status": status, "faction": faction}
-    sys.exit("Could not find the configured server/region on the page.")
+        name = words[0].lower()
+        if name in seen:           # guard against the same row appearing twice
+            continue
+        seen.add(name)
+        region_total += 1
+        if status.lower() == "online":
+            region_online += 1
+        if name == SERVER_NAME.lower():
+            mine = {"status": status, "faction": faction}
+
+    if mine is None:
+        sys.exit("Could not find the configured server/region on the page.")
+    mine["region_online"] = region_online
+    mine["region_total"] = region_total
+    return mine
 
 
-def build_embed(current, since, now):
+def build_embed(current, since, now, recovering):
     key = current["status"].lower()
     icon = ICONS.get(key, "⚪")
+    lines = [f"## {icon} {current['status']}"]
+    if recovering:
+        lines.append(f"🟡 **Servers are coming back online** · "
+                     f"{SERVER_NAME} may not be showing as online yet")
+    lines.append(f"[Server Status Information provided by aion2.gaming.tools]({URL})")
     return {
         "title": f"AION 2 · {SERVER_NAME}",
         "url": URL,
         "color": COLORS.get(key, 0x95A5A6),
-        "description": (
-            f"## {icon} {current['status']}\n"
-            f"[Server Status Information provided by aion2.gaming.tools]({URL})"
-        ),
+        "description": "\n".join(lines),
         "fields": [
             {"name": "Region", "value": REGION, "inline": True},
             {"name": "Faction", "value": current["faction"], "inline": True},
+            {"name": "Online in region",
+             "value": f"{current['region_online']} / {current['region_total']}", "inline": True},
             {"name": "Status since", "value": f"<t:{since}:R>", "inline": True},
             {"name": "Last checked", "value": f"<t:{now}:R>", "inline": True},
             {"name": "Next check", "value": f"<t:{now + CHECK_INTERVAL_MINUTES * 60}:R>", "inline": True},
         ],
         "footer": {"text": f"Checked about every {CHECK_INTERVAL_MINUTES} minutes"},
     }
+
+
+def notification_text(current, recovery_started):
+    if recovery_started:
+        return (f"🟡 Servers are coming back online in {REGION} "
+                f"({current['region_online']} of {current['region_total']} up)")
+    icon = ICONS.get(current["status"].lower(), "⚪")
+    return f"{icon} **{SERVER_NAME}** is now **{current['status']}**"
 
 
 def hook_key(webhook):
@@ -107,13 +136,11 @@ def delete_message(webhook, message_id):
         r.raise_for_status()
 
 
-def send_notification(webhook, current):
-    icon = ICONS.get(current["status"].lower(), "⚪")
+def send_notification(webhook, text):
     r = requests.post(
         webhook,
         params={"wait": "true"},
-        json={"content": f"{icon} **{SERVER_NAME}** is now **{current['status']}**",
-              "allowed_mentions": NO_MENTIONS},
+        json={"content": text, "allowed_mentions": NO_MENTIONS},
         timeout=30,
     )
     r.raise_for_status()
@@ -122,13 +149,24 @@ def send_notification(webhook, current):
 
 def main():
     current = fetch_server()
-    print(f"Status: {current['status']}")
+    print(f"Status: {current['status']} | "
+          f"region online: {current['region_online']}/{current['region_total']}")
     prev = json.loads(STATE_FILE.read_text()) if STATE_FILE.exists() else {}
     now = int(time.time())
 
     status_changed = prev.get("status") != current["status"]
     since = now if status_changed else prev.get("since", now)
-    embed = build_embed(current, since, now)
+
+    # "Coming back online": the region hit zero online, and now some servers are
+    # up while ours still isn't. The flag is cleared once our server is online.
+    online_n = current["region_online"]
+    mine_online = current["status"].lower() == "online"
+    region_down = prev.get("region_down", False) or online_n == 0
+    recovering = region_down and online_n >= RECOVERY_MIN_ONLINE and not mine_online
+    if mine_online:
+        region_down = False
+
+    embed = build_embed(current, since, now, recovering)
 
     # Per-webhook state, keyed by a hash. Migrate the old single-webhook format.
     hooks_prev = prev.get("hooks", {})
@@ -151,14 +189,19 @@ def main():
 
             # Update the embed on every run so the timers stay accurate
             had_status = hs.get("status")
+            had_recovering = hs.get("recovering", False)
             hs["message_id"] = upsert_message(webhook, embed, hs.get("message_id"))
             hs["status"] = current["status"]
+            hs["recovering"] = recovering
 
-            # Optional notification, only when the status actually changed
-            if NOTIFY_ON_CHANGE and had_status and had_status != current["status"]:
+            # Optional notification, only on a real change
+            recovery_started = recovering and not had_recovering and bool(had_status)
+            changed = bool(had_status) and had_status != current["status"]
+            if NOTIFY_ON_CHANGE and (recovery_started or changed):
                 delete_message(webhook, hs.pop("notify_id", None))
                 hs.pop("notify_at", None)
-                hs["notify_id"] = send_notification(webhook, current)
+                hs["notify_id"] = send_notification(
+                    webhook, notification_text(current, recovery_started))
                 hs["notify_at"] = now
         except requests.RequestException as e:
             # Never print the exception text: it can contain the webhook URL.
@@ -168,7 +211,8 @@ def main():
             hs = old   # keep previous state so this webhook is retried next run
         hooks_new[key] = hs
 
-    state = {"status": current["status"], "since": since, "hooks": hooks_new}
+    state = {"status": current["status"], "since": since,
+             "region_down": region_down, "hooks": hooks_new}
     if state != prev:
         STATE_FILE.write_text(json.dumps(state, indent=2))
 
