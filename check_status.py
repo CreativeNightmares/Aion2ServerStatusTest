@@ -79,28 +79,28 @@ def fetch_server():
 def build_embed(current, down_since, now, recovering):
     key = current["status"].lower()
     icon = ICONS.get(key, "⚪")
+    # Live timers go in the description as plain lines. In inline fields their
+    # changing width would make Discord resize the columns every second.
     lines = [f"## {icon} {current['status']}"]
     if recovering:
         lines.append(f"🟡 **Servers are coming back online** · "
                      f"{SERVER_NAME} may not be showing as online yet")
-    lines.append(f"[Server Status Information provided by aion2.gaming.tools]({URL})")
-    fields = [
-        {"name": "Region", "value": REGION, "inline": True},
-        {"name": "Faction", "value": current["faction"], "inline": True},
-        {"name": "Online in region",
-         "value": f"{current['region_online']} / {current['region_total']}", "inline": True},
-        {"name": "Last checked", "value": f"<t:{now}:R>", "inline": True},
-        {"name": "Next check", "value": f"<t:{now + CHECK_INTERVAL_MINUTES * 60}:R>", "inline": True},
-    ]
     if down_since is not None:   # only shown while the server isn't online
-        fields.append({"name": "Offline since",
-                       "value": f"<t:{down_since}:R>", "inline": True})
+        lines.append(f"⏳ **Offline since** <t:{down_since}:R>")
+    lines.append(f"🔄 **Last checked** <t:{now}:R> · "
+                 f"**Next check** <t:{now + CHECK_INTERVAL_MINUTES * 60}:R>")
+    lines.append(f"[Server Status Information provided by aion2.gaming.tools]({URL})")
     return {
         "title": f"AION 2 · {SERVER_NAME}",
         "url": URL,
         "color": COLORS.get(key, 0x95A5A6),
         "description": "\n".join(lines),
-        "fields": fields,
+        "fields": [
+            {"name": "Region", "value": REGION, "inline": True},
+            {"name": "Faction", "value": current["faction"], "inline": True},
+            {"name": "Online in region",
+             "value": f"{current['region_online']} / {current['region_total']}", "inline": True},
+        ],
         "footer": {"text": f"Checked about every {CHECK_INTERVAL_MINUTES} minutes"},
     }
 
